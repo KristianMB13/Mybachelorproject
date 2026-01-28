@@ -1,0 +1,71 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-demo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-demo_password}
+      POSTGRES_DB: ${POSTGRES_DB:-maritime}
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: light
+      POSTGRES_USER: ${POSTGRES_USER:-demo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-demo_password}
+      POSTGRES_DB: ${POSTGRES_DB:-maritime}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - timescaledb
+
+  agent:
+    build: ./agent-dotnet
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-demo}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-demo_password}
+      DB_NAME: ${POSTGRES_DB:-maritime}
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:8b}
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      - timescaledb
+      - ollama
+
+  generator:
+    build: ./generator-dotnet
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-demo}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-demo_password}
+      DB_NAME: ${POSTGRES_DB:-maritime}
+      SLEEP_SECONDS: 5
+      LOG_LEVEL: INFO
+    depends_on:
+      - timescaledb
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  timescale_data:
+  grafana_data:
+  ollama_data:
