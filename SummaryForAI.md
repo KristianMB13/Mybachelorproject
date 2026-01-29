@@ -1,35 +1,33 @@
-# SummaryForAI
+ï»¿# SummaryForAI
 
-This document summarizes the current state of the **dashboardAIagentDemo** project, its architecture, what has been implemented, what is running, and what remains to be done. It is intended to help another AI (or a new teammate) quickly understand the full context and current setup.
+This document summarizes the current state of the **dashboardAIagentDemo** project, its architecture, what is implemented, what is running, and important troubleshooting history. It is written for another AI or teammate to take over the project quickly with full context.
 
 ---
 
 ## Project Goal (Short)
-A minimal, working “agentic observability” demo for maritime telemetry:
+Minimal, working â€œagentic observabilityâ€ demo for maritime telemetry:
 
-- Synthetic vessel telemetry ? TimescaleDB
+- Synthetic vessel telemetry -> TimescaleDB (Postgres + Timescale)
 - Grafana dashboards visualize metrics and events
-- An AI agent analyzes events by querying data and calling an LLM (Ollama)
+- An AI agent analyzes events by querying data and calling a local LLM (Ollama)
 - AI analysis is stored and shown in Grafana
 - MCP concepts are represented via agent endpoints
 
-This is a **local Docker Compose** demo intended for a bachelor project collaboration with Knowit, representing a realistic telemetry context (Telenor Maritime / Color Line style data), but without real vessel data.
+This is a local Docker Compose demo for a bachelor project in collaboration with Knowit, representing a realistic maritime telemetry context (Telenor Maritime / Color Line style data) without real vessel data.
 
 ---
 
-## Current Architecture
+## Current Architecture (Data Flow)
 
-**Data flow:**
-
-1) **Telemetry generator** writes synthetic data into TimescaleDB (Postgres + Timescale)
-2) **Event records** are generated alongside telemetry based on anomaly rules
-3) **Grafana** reads telemetry + events from TimescaleDB and shows them
-4) **Agent service** queries telemetry around an event and builds an LLM prompt
-5) **LLM (Ollama)** returns a JSON explanation
+1) Telemetry generator writes synthetic data into TimescaleDB
+2) Events are generated based on anomaly rules
+3) Grafana reads telemetry + events
+4) Agent service queries telemetry around an event and builds an LLM prompt
+5) Ollama returns a JSON explanation
 6) Agent stores explanation in `ai_analyses`
-7) Grafana panel shows latest AI insight
+7) Grafana shows AI insight + Event Log
 
-**Mermaid version (simplified):**
+Mermaid (simplified):
 
 ```
 flowchart LR
@@ -48,7 +46,7 @@ flowchart LR
 
 **TimescaleDB**
 - Image: `timescale/timescaledb:latest-pg14`
-- Ports: `5432`
+- Port: `5432`
 - DB: `maritime`
 - User: `demo`
 - Password: `demo_password`
@@ -56,23 +54,24 @@ flowchart LR
 **Grafana**
 - Image: `grafana/grafana:10.4.3`
 - Port: `3000`
-- Admin password: `admin` (can be changed via `.env`)
+- Admin password: `admin` (configurable via `.env`)
 - Provisioned datasource + dashboard
 
 **Agent Service (C#)**
 - .NET 8 Web API
-- Runs on port `8000`
-- Implements event analysis and MCP endpoints
+- Port `8000`
+- Implements event analysis + MCP endpoints
 
 **Telemetry Generator (C#)**
 - .NET 8 console service
-- Background loop inserting synthetic data + events
+- Inserts telemetry and events in a loop
+- Auto-triggers analysis for events
 
 **Ollama (LLM)**
 - Containerized via docker-compose
-- Port: `11434`
-- Model: `llama3:8b` (configured via env)
-- Model pull was attempted but may not be complete yet
+- Port `11434`
+- Model: `llama3:8b` (configurable via env)
+- Model is pulled and working (analysis returns JSON)
 
 ---
 
@@ -82,7 +81,7 @@ flowchart LR
 - `vessel_id` (text)
 - `ts` (timestamp)
 - `engine_rpm`, `engine_temp`, `oil_pressure`, `fuel_pressure`, `coolant_temp`
-- `data_quality_score` (0–1)
+- `data_quality_score` (0-1)
 
 **events**
 - `event_id` (uuid)
@@ -90,7 +89,7 @@ flowchart LR
 - `vessel_id`
 - `sensor_id`
 - `severity` (INFO / WARNING / CRITICAL)
-- `event_type` (overtemp, low_oil_pressure, rpm_anomaly, missing_data, bad_timestamp, bad_data_quality)
+- `event_type` (overtemp, low_oil_pressure, rpm_anomaly)
 - `description`
 - `metrics_snapshot` (json)
 
@@ -108,35 +107,32 @@ Schema file: `db/init/001_init.sql`
 
 ## Fake Data / Synthetic Generator (Important)
 
-The project **generates its own synthetic maritime telemetry data**.
+The project generates its own synthetic maritime telemetry data.
 
-Generator behavior:
-
+Generator behavior (current):
 - Two vessels: `vessel_001`, `vessel_002`
-- Inserts telemetry every few seconds
-- Simulated ranges:
-  - RPM around 70–140
-  - Temp around 65–95
-  - Pressure ranges around realistic-ish values
-  - `data_quality_score` usually 0.92–0.99
-- Occasionally (8% chance) generates anomalies:
-  - `overtemp` (temp spike)
+- Inserts telemetry every `SLEEP_SECONDS` (default 5s)
+- Normal ranges (approx):
+  - RPM: 70-140
+  - Engine temp: 65-95
+  - Oil pressure: 25-55
+  - Fuel pressure: 35-70
+  - Coolant temp: 55-85
+  - Data quality: 0.92-0.99
+- Random anomalies: 6% chance per cycle
+  - `overtemp`
   - `low_oil_pressure`
   - `rpm_anomaly`
-  - `bad_timestamp` (future timestamp)
-  - `missing_data` (event but skip telemetry insert)
-  - `bad_data_quality` (low score)
+- Scheduled demo anomaly every ~10 min for `vessel_001` (loopCounter % 120 with 5s loop)
+- When an anomaly happens, data_quality is reduced (<= 0.8)
+- Every event auto-triggers the agent analysis (POST `/analyze`)
 
-These anomalies are written to the `events` table. The telemetry and events are used by Grafana dashboards and the AI agent.
-
-**Generator source (C#)**:
+Generator source (C#):
 - `generator-dotnet/Program.cs`
 
 ---
 
 ## Agent Service (C#)
-
-The agent mirrors the original Python FastAPI service but is now fully in C# (.NET 8).
 
 Endpoints:
 - `GET /health`
@@ -148,29 +144,18 @@ Endpoints:
 - `POST /mcp/call`
 
 Behavior:
-- Queries `events` to find the event
-- Builds a context window (event timestamp ± 30–35 minutes)
-- Queries telemetry stats in that window
-- Calls Ollama to generate JSON analysis
-- Applies guardrails:
-  - If no samples ? lower confidence
-  - If avg_data_quality < 0.6 ? mention low data quality
-  - If LLM fails ? fallback with low confidence
+- Finds an event by ID
+- Queries telemetry stats in a window from -30 minutes to +5 minutes around event time
+- Builds a strict prompt (JSON-only) for the LLM
+- Calls Ollama (`/api/generate`) and parses JSON
+- Guardrails:
+  - Low sample count -> lower confidence
+  - Low avg data_quality -> note in response + lower confidence
+  - LLM failures -> fallback summary + lower confidence
 - Stores analysis into `ai_analyses`
 
 Agent source (C#):
 - `agent-dotnet/Program.cs`
-
----
-
-## MCP (Model Context Protocol) Handling
-
-MCP is represented by the agent itself, which exposes tool-like endpoints:
-
-- `GET /mcp/tools`
-- `POST /mcp/call`
-
-There is no separate MCP proxy service anymore (original Python stub removed). This is still “MCP-style” rather than a full MCP plugin integration.
 
 ---
 
@@ -180,17 +165,15 @@ Dashboard: **Maritime Vessel Overview v3**
 
 Panels:
 - Stat cards: Engine Temp, RPM, Oil Pressure, Coolant Temp
-- Time series: Engine Temp and RPM
-- Event Log table (24h)
-- AI Insight panel (latest analysis)
+- Time series: Engine Temp + RPM (last 6h)
+- **AI Insights (latest 10)** table (latest analyses, last 24h)
+- **Event Log (last 24h)** table
 
-Event Log includes an **Analyze** link that calls:
-
-```
-http://localhost:8000/analyze?event_id=<event_id>
-```
-
-The analysis is stored in the database and the AI Insight panel shows the latest record for the vessel.
+Event Log behavior:
+- The Analyze column links to:
+  `http://localhost:8000/analyze?event_id=<event_id>&format=html`
+- The link opens a simple HTML view (readable summary). It uses cached analysis if available for fast load and stores any new analysis into `ai_analyses`.
+- You can force regeneration with: `&force=true`
 
 Dashboard file:
 - `grafana/dashboards/maritime_vessel_overview_v3.json`
@@ -199,38 +182,74 @@ Provisioning:
 - `grafana/provisioning/datasources/datasource.yml`
 - `grafana/provisioning/dashboards/dashboard.yml`
 
-Grafana is pinned to **version 10.4.3** for stability.
+Grafana is pinned to 10.4.3 for stability with the current dashboard JSON.
+
+---
+
+## MCP (Model Context Protocol)
+
+MCP is represented by the agent itself:
+- `GET /mcp/tools` lists tools and schemas
+- `POST /mcp/call` routes tool calls
+
+No separate MCP proxy is running; it is a lightweight MCP-style interface.
 
 ---
 
 ## Migration from Python to C#
 
-Originally, both agent + generator were Python (FastAPI + psycopg2). Those folders were removed, and C# equivalents replaced them:
+Originally the agent + generator were Python. They were removed and replaced with C# equivalents:
+- Removed Python folders: `agent/`, `generator/`
+- Added C# services: `agent-dotnet/`, `generator-dotnet/`
 
-- Python removed:
-  - `agent/`
-  - `generator/`
-- New services:
-  - `agent-dotnet/`
-  - `generator-dotnet/`
+Runtime services are now C# only.
 
-This keeps the repo “C# only” for runtime services.
+---
+
+## Recent Issues and Fixes (Important Troubleshooting)
+
+1) **Event Log panel empty** even though events existed in DB.
+   - Root cause: Grafana panel error in Inspect -> Data.
+   - Error: `byValue not found` (invalid color mode for Grafana 10.4.3).
+   - Fix: Change color mode to `palette-classic-by-name`.
+
+2) **Event Log still empty after fix**.
+   - Root cause: time filter mismatch and missing panel override.
+   - Fixes:
+     - Event Log panel uses `timeFrom: "24h"` to override dashboard time range.
+     - Query uses `__timeFilter(ts)` and aliases `ts AS time`.
+
+3) **AI Insight showing only one row / outdated**.
+   - Fix: Query updated to show latest 10 analyses in last 24h.
+
+4) **Timestamp confusion**.
+   - `event_ts` = time of event (UTC)
+   - `created_at` = time the analysis was created (UTC)
+   - Grafana uses browser timezone, so there can be apparent offsets.
 
 ---
 
 ## Ollama Status
 
-- Ollama is now included in docker-compose.
-- Agent points to `http://ollama:11434`.
-- Model pull command was initiated but **was interrupted**. It may not be fully downloaded yet.
+- Ollama is running in docker-compose.
+- Model `llama3:8b` is pulled and responding.
+- Agent calls Ollama and returns JSON analysis successfully.
 
-Once pulled, the agent will produce real AI output.
-
-Suggested command:
-
+Command (if needed):
 ```
 docker compose exec ollama ollama pull llama3:8b
 ```
+
+---
+
+## Current Runtime Status (as last checked)
+
+- Agent (C#) running on port 8000
+- Generator (C#) running and inserting data + events
+- Grafana running on port 3000
+- TimescaleDB running on port 5432
+- Ollama running on port 11434
+- AI Insight and Event Log are working in Grafana
 
 ---
 
@@ -246,26 +265,19 @@ docker compose exec ollama ollama pull llama3:8b
 
 ---
 
-## Current Runtime Status (as last checked)
+## How to Run (Short)
 
-- Agent (C#) running on port 8000
-- Generator (C#) running and inserting data
-- Grafana running on port 3000
-- TimescaleDB running on port 5432
-- Ollama running on port 11434 but model pull may be incomplete
+```
+docker compose up --build
+```
 
----
-
-## Future Work (Planned)
-
-- Fully integrate Ollama model (confirm model download)
-- Add RAG system and domain docs
-- Improve anomaly rules and explanation quality
-- Potential MCP plugin integration in Grafana
-- Realistic or semi-realistic dataset ingestion
+Then:
+- http://localhost:3000
+- Login: admin / admin
+- Dashboard: Maritime Vessel Overview v3
 
 ---
 
 ## Summary Statement
 
-This demo is fully working with synthetic telemetry and events, dashboards in Grafana, and a C# agent that can call Ollama to generate explanations. All runtime services are now in C#, and the demo represents the core “agentic observability” architecture required for the bachelor project. The only missing step for AI responses is to complete the Ollama model download and run analysis calls.
+The demo is working end-to-end: synthetic telemetry generates events, Grafana shows metrics and events, the C# agent queries the DB and calls Ollama, AI analyses are stored and visualized. The system is now stable and uses only C# services for runtime logic. The main gotchas were Grafana panel config errors and time filtering, both now fixed.

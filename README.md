@@ -18,7 +18,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-3) Pull a model for Ollama (one-time):
+3) Pull a model for Ollama (one-time, skip if already pulled):
 
 ```bash
 docker compose exec ollama ollama pull llama3:8b
@@ -32,13 +32,19 @@ docker compose exec ollama ollama pull llama3:8b
 
 Dashboard: **Maritime Vessel Overview v3** (auto-provisioned).
 
+Notes:
+- Event Log panel is forced to show last 24h regardless of the dashboard time range.
+- AI Insights shows the latest 10 analyses from the last 24h.
+- Analyze links open a simple HTML view from the agent (cached if available).
+
 ## Demo script (live walkthrough)
 
 1) Open the Grafana dashboard and select `vessel_001`.
 2) Show top stat cards and the temp/RPM time series.
 3) Scroll to the Event Log table and click the **Analyze** link on an event row.
-   - The link triggers analysis in the agent and stores it in `ai_analyses`.
-4) Refresh the dashboard or wait for the refresh interval; the **AI Insight** panel shows the latest analysis.
+   - The link opens a simple HTML view (cached if available) and stores the analysis in `ai_analyses`.
+4) Refresh the dashboard or wait for the refresh interval; the **AI Insights (latest 10)** panel shows the latest analyses.
+5) Note: the generator also auto-analyzes events, so AI Insights should update even without manual clicks.
 
 Optional CLI trigger:
 
@@ -112,6 +118,6 @@ Agent service (`http://localhost:8000`):
 
 - [ ] `docker compose up --build` runs without errors
 - [ ] Data appears in Grafana within 1-2 minutes
-- [ ] Event Log populates and Analyze link works
-- [ ] AI Insight panel shows a stored analysis
+- [ ] Event Log populates (last 24h) and Analyze link works
+- [ ] AI Insights panel shows stored analyses (latest 10)
 - [ ] Ollama model is pulled and responding

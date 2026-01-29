@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using System.Text.Json;
 using Npgsql;
 using NpgsqlTypes;
@@ -13,13 +14,16 @@ string dbUser = GetEnv("DB_USER", "demo");
 string dbPassword = GetEnv("DB_PASSWORD", "demo_password");
 string dbName = GetEnv("DB_NAME", "maritime");
 int sleepSeconds = int.Parse(GetEnv("SLEEP_SECONDS", "5"));
+string agentUrl = GetEnv("AGENT_URL", "http://agent:8000").TrimEnd('/');
 
 string connString = $"Host={dbHost};Port={dbPort};Username={dbUser};Password={dbPassword};Database={dbName}";
 
 var vessels = new[] { "vessel_001", "vessel_002" };
 var random = new Random();
+using var agentClient = new HttpClient { BaseAddress = new Uri(agentUrl) };
 
 var state = InitState(vessels, random);
+var loopCounter = 0;
 
 await using var conn = await ConnectWithRetryAsync(connString, logger);
 
@@ -28,6 +32,7 @@ while (true)
     var now = DateTime.UtcNow;
     await using var cmd = conn.CreateCommand();
 
+    loopCounter++;
     foreach (var vesselId in vessels)
     {
         var metrics = state[vesselId];
@@ -39,26 +44,24 @@ while (true)
 
         double dataQuality = NextRange(random, 0.92, 0.99);
         var evt = MaybeGenerateEvent(random, metrics);
-
-        var ts = now;
-        if (evt != null && evt.EventType == "bad_timestamp")
+        if (vesselId == "vessel_001" && loopCounter % 120 == 0)
         {
-            ts = now.AddMinutes(5);
+            evt = ForceScheduledEvent(random, metrics);
         }
 
+        var ts = now;
         if (evt != null && (evt.EventType == "overtemp" || evt.EventType == "low_oil_pressure" || evt.EventType == "rpm_anomaly"))
         {
             dataQuality = Math.Min(dataQuality, 0.8);
         }
 
-        if (evt != null && evt.EventType == "bad_data_quality")
-        {
-            dataQuality = NextRange(random, 0.2, 0.5);
-        }
-
         if (evt != null && evt.SkipInsert)
         {
-            await InsertEventAsync(conn, vesselId, ts, evt, metrics, dataQuality);
+            var eventId = await InsertEventAsync(conn, vesselId, ts, evt, metrics, dataQuality);
+            if (evt.AutoAnalyze)
+            {
+                await TriggerAnalyzeAsync(agentClient, eventId, logger);
+            }
             continue;
         }
 
@@ -66,7 +69,11 @@ while (true)
 
         if (evt != null)
         {
-            await InsertEventAsync(conn, vesselId, ts, evt, metrics, dataQuality);
+            var eventId = await InsertEventAsync(conn, vesselId, ts, evt, metrics, dataQuality);
+            if (evt.AutoAnalyze)
+            {
+                await TriggerAnalyzeAsync(agentClient, eventId, logger);
+            }
         }
     }
 
@@ -118,7 +125,7 @@ static Dictionary<string, Metrics> InitState(string[] vessels, Random random)
 static GeneratedEvent? MaybeGenerateEvent(Random random, Metrics metrics)
 {
     var roll = random.NextDouble();
-    if (roll > 0.08)
+    if (roll > 0.06)
     {
         return null;
     }
@@ -128,9 +135,9 @@ static GeneratedEvent? MaybeGenerateEvent(Random random, Metrics metrics)
         "overtemp",
         "low_oil_pressure",
         "rpm_anomaly",
-        "bad_timestamp",
-        "missing_data",
-        "bad_data_quality"
+        "overtemp",
+        "low_oil_pressure",
+        "rpm_anomaly"
     };
 
     string eventType = eventTypes[random.Next(eventTypes.Length)];
@@ -161,29 +168,42 @@ static GeneratedEvent? MaybeGenerateEvent(Random random, Metrics metrics)
         sensorId = "engine_rpm";
         description = "RPM surge detected.";
     }
-    else if (eventType == "bad_timestamp")
-    {
-        severity = "WARNING";
-        sensorId = "timestamp";
-        description = "Timestamp offset detected.";
-    }
-    else if (eventType == "missing_data")
-    {
-        severity = "WARNING";
-        sensorId = "telemetry";
-        description = "Telemetry missing for expected interval.";
-        skipInsert = true;
-    }
-    else if (eventType == "bad_data_quality")
-    {
-        severity = "INFO";
-        sensorId = "data_quality";
-        description = "Low data quality score detected.";
-    }
-
-    return new GeneratedEvent(eventType, severity, sensorId, description, skipInsert);
+    return new GeneratedEvent(eventType, severity, sensorId, description, skipInsert, true);
 }
 
+static GeneratedEvent ForceScheduledEvent(Random random, Metrics metrics)
+{
+    var eventTypes = new[] { "overtemp", "low_oil_pressure", "rpm_anomaly" };
+    string eventType = eventTypes[random.Next(eventTypes.Length)];
+
+    string severity = "CRITICAL";
+    string sensorId = "telemetry";
+    string description = "Scheduled demo anomaly.";
+
+    if (eventType == "overtemp")
+    {
+        metrics.EngineTemp += 30;
+        severity = "CRITICAL";
+        sensorId = "engine_temp";
+        description = "Scheduled over-temperature spike.";
+    }
+    else if (eventType == "low_oil_pressure")
+    {
+        metrics.OilPressure -= 20;
+        severity = "CRITICAL";
+        sensorId = "oil_pressure";
+        description = "Scheduled oil pressure drop.";
+    }
+    else if (eventType == "rpm_anomaly")
+    {
+        metrics.EngineRpm += 50;
+        severity = "WARNING";
+        sensorId = "engine_rpm";
+        description = "Scheduled RPM surge.";
+    }
+
+    return new GeneratedEvent(eventType, severity, sensorId, description, false, true);
+}
 static async Task InsertTelemetryAsync(NpgsqlConnection conn, string vesselId, DateTime ts, Metrics metrics, double dataQuality)
 {
     const string sql = @"INSERT INTO telemetry (
@@ -204,7 +224,7 @@ static async Task InsertTelemetryAsync(NpgsqlConnection conn, string vesselId, D
     await cmd.ExecuteNonQueryAsync();
 }
 
-static async Task InsertEventAsync(NpgsqlConnection conn, string vesselId, DateTime ts, GeneratedEvent evt, Metrics metrics, double dataQuality)
+static async Task<string> InsertEventAsync(NpgsqlConnection conn, string vesselId, DateTime ts, GeneratedEvent evt, Metrics metrics, double dataQuality)
 {
     const string sql = @"INSERT INTO events (
   event_id, ts, vessel_id, sensor_id, severity, event_type, description, metrics_snapshot
@@ -237,11 +257,27 @@ static async Task InsertEventAsync(NpgsqlConnection conn, string vesselId, DateT
     cmd.Parameters.Add(jsonParam);
 
     await cmd.ExecuteNonQueryAsync();
+    return eventId.ToString();
 }
 
 static double Clamp(double value, double low, double high) => Math.Max(low, Math.Min(high, value));
 
 static double NextRange(Random random, double min, double max) => min + (random.NextDouble() * (max - min));
+
+static async Task TriggerAnalyzeAsync(HttpClient client, string eventId, Logger logger)
+{
+    try
+    {
+        var payload = new { event_id = eventId };
+        using var response = await client.PostAsJsonAsync("/analyze", payload);
+        response.EnsureSuccessStatusCode();
+        logger.Info($"Auto-analyzed event {eventId}");
+    }
+    catch (Exception ex)
+    {
+        logger.Warn($"Auto-analyze failed for {eventId}: {ex.Message}");
+    }
+}
 
 record Metrics
 {
@@ -252,7 +288,7 @@ record Metrics
     public double CoolantTemp { get; set; }
 }
 
-record GeneratedEvent(string EventType, string Severity, string SensorId, string Description, bool SkipInsert);
+record GeneratedEvent(string EventType, string Severity, string SensorId, string Description, bool SkipInsert, bool AutoAnalyze = false);
 
 sealed class Logger
 {

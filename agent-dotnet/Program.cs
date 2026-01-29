@@ -55,9 +55,10 @@ app.MapPost("/analyze", async (AnalyzeRequest req) =>
     return await AnalyzeEventAsync(req.event_id);
 });
 
-app.MapGet("/analyze", async ([FromQuery] string event_id) =>
+app.MapGet("/analyze", async (HttpRequest request, [FromQuery] string event_id, [FromQuery] string? format, [FromQuery] bool? force) =>
 {
-    return await AnalyzeEventAsync(event_id);
+    bool asHtml = WantsHtml(request, format);
+    return await AnalyzeEventAsync(event_id, asHtml, force ?? false);
 });
 
 app.MapGet("/analyze/latest", async ([FromQuery] string? vessel_id) =>
@@ -216,7 +217,7 @@ string GetEnv(string key, string fallback) =>
         ? fallback
         : Environment.GetEnvironmentVariable(key)!.Trim();
 
-async Task<IResult> AnalyzeEventAsync(string eventId)
+async Task<IResult> AnalyzeEventAsync(string eventId, bool asHtml = false, bool force = false)
 {
     if (!Guid.TryParse(eventId, out var eventUuid))
     {
@@ -232,6 +233,18 @@ async Task<IResult> AnalyzeEventAsync(string eventId)
         return Results.NotFound(new { detail = "Event not found" });
     }
 
+    var cached = await QueryLatestAnalysisAsync(conn, record.EventId);
+    if (!force && cached != null)
+    {
+        if (asHtml)
+        {
+            string html = BuildHtmlResponse(record, cached.Analysis, cached.CreatedAt, true);
+            return Results.Content(html, "text/html");
+        }
+
+        return Results.Ok(cached.Analysis);
+    }
+
     var windowEnd = record.Ts.AddMinutes(5);
     var windowStart = record.Ts.AddMinutes(-30);
     var stats = await QueryStatsAsync(conn, record.VesselId, windowStart, windowEnd);
@@ -240,6 +253,12 @@ async Task<IResult> AnalyzeEventAsync(string eventId)
     var ragSources = Array.Empty<string>();
 
     await StoreAnalysisAsync(conn, record, analysis, ragSources);
+
+    if (asHtml)
+    {
+        string html = BuildHtmlResponse(record, analysis, DateTime.UtcNow, false);
+        return Results.Content(html, "text/html");
+    }
 
     return Results.Ok(analysis);
 }
@@ -442,6 +461,96 @@ string BuildPrompt(EventRecord record, Dictionary<string, object?> stats, DateTi
     sb.AppendLine("- Keep possible_causes and recommended_actions short.");
 
     return sb.ToString();
+}
+
+bool WantsHtml(HttpRequest request, string? format)
+{
+    if (!string.IsNullOrWhiteSpace(format) && format.Equals("html", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (request.Headers.TryGetValue("Accept", out var accept))
+    {
+        return accept.Any(value => value.Contains("text/html", StringComparison.OrdinalIgnoreCase));
+    }
+
+    return false;
+}
+
+string BuildHtmlResponse(EventRecord record, Dictionary<string, object?> analysis, DateTime createdAt, bool fromCache)
+{
+    string summary = GetStringPayload(analysis, "summary") ?? "No summary returned by model.";
+    var causes = GetStringListPayload(analysis, "possible_causes");
+    var actions = GetStringListPayload(analysis, "recommended_actions");
+    int confidence = GetIntPayload(analysis, "confidence") ?? 50;
+    string dataQualityNotes = GetStringPayload(analysis, "data_quality_notes") ?? string.Empty;
+
+    string causesHtml = causes.Count == 0 ? "<li>None</li>" : string.Join("", causes.Select(c => $"<li>{System.Net.WebUtility.HtmlEncode(c)}</li>"));
+    string actionsHtml = actions.Count == 0 ? "<li>None</li>" : string.Join("", actions.Select(a => $"<li>{System.Net.WebUtility.HtmlEncode(a)}</li>"));
+
+    string window = string.Empty;
+    if (analysis.TryGetValue("evidence", out var evidenceObj) && evidenceObj is Dictionary<string, object?> evidence)
+    {
+        if (evidence.TryGetValue("window", out var windowObj) && windowObj != null)
+        {
+            window = windowObj.ToString() ?? string.Empty;
+        }
+    }
+
+    string title = $"{record.EventType} - {record.VesselId}";
+    string summaryEscaped = System.Net.WebUtility.HtmlEncode(summary);
+    string notesEscaped = System.Net.WebUtility.HtmlEncode(dataQualityNotes);
+    string sourceNote = fromCache ? "Cached analysis" : "New analysis";
+
+    return $@"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+  <meta charset=""UTF-8"">
+  <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
+  <title>AI Analysis - {System.Net.WebUtility.HtmlEncode(title)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; background: #f5f6f8; margin: 0; padding: 24px; color: #1f2933; }}
+    .card {{ background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 20px; max-width: 900px; margin: 0 auto; }}
+    h1 {{ font-size: 20px; margin: 0 0 6px 0; }}
+    .meta {{ color: #52606d; font-size: 13px; margin-bottom: 12px; }}
+    .section {{ margin-top: 16px; }}
+    .label {{ font-weight: 600; margin-bottom: 6px; }}
+    ul {{ margin: 6px 0 0 20px; }}
+    .confidence {{ font-weight: 600; }}
+    .pill {{ display: inline-block; padding: 2px 8px; border-radius: 12px; background: #e1e8f0; font-size: 12px; margin-left: 8px; }}
+    .summary {{ background: #f0f4f8; padding: 12px; border-radius: 8px; }}
+    .notes {{ background: #fff7ed; padding: 10px; border-radius: 8px; }}
+  </style>
+</head>
+<body>
+  <div class=""card"">
+    <h1>AI Analysis</h1>
+    <div class=""meta"">{System.Net.WebUtility.HtmlEncode(record.VesselId)} - {System.Net.WebUtility.HtmlEncode(record.EventType)} - {record.Ts:o}</div>
+    <div class=""meta"">{sourceNote} - Created at {createdAt:o}</div>
+    <div class=""section"">
+      <div class=""label"">Summary <span class=""pill confidence"">Confidence: {confidence}</span></div>
+      <div class=""summary"">{summaryEscaped}</div>
+    </div>
+    <div class=""section"">
+      <div class=""label"">Possible causes</div>
+      <ul>{causesHtml}</ul>
+    </div>
+    <div class=""section"">
+      <div class=""label"">Recommended actions</div>
+      <ul>{actionsHtml}</ul>
+    </div>
+    <div class=""section"">
+      <div class=""label"">Data quality notes</div>
+      <div class=""notes"">{notesEscaped}</div>
+    </div>
+    <div class=""section"">
+      <div class=""label"">Context window</div>
+      <div>{System.Net.WebUtility.HtmlEncode(window)}</div>
+    </div>
+  </div>
+</body>
+</html>";
 }
 
 async Task<string> CallOllamaAsync(string prompt)
@@ -673,9 +782,27 @@ List<string> GetStringListPayload(Dictionary<string, object?> payload, string ke
         return new List<string>();
     }
 
-    if (value is List<string> list)
+    if (value is List<string> stringList)
     {
-        return list;
+        return stringList;
+    }
+
+    if (value is List<object?> objList)
+    {
+        var values = new List<string>();
+        foreach (var item in objList)
+        {
+            if (item == null)
+            {
+                continue;
+            }
+            var text = item.ToString();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                values.Add(text);
+            }
+        }
+        return values;
     }
 
     if (value is string str)
@@ -737,6 +864,95 @@ VALUES (@id, @created_at, @event_id, @vessel_id, @ai_summary, @rag_sources)";
     await cmd.ExecuteNonQueryAsync();
 }
 
+async Task<StoredAnalysis?> QueryLatestAnalysisAsync(NpgsqlConnection conn, Guid eventId)
+{
+    const string sql = @"SELECT created_at, ai_summary
+FROM ai_analyses
+WHERE event_id = @event_id
+ORDER BY created_at DESC
+LIMIT 1";
+
+    await using var cmd = new NpgsqlCommand(sql, conn);
+    cmd.Parameters.AddWithValue("event_id", eventId);
+
+    await using var reader = await cmd.ExecuteReaderAsync();
+    if (!await reader.ReadAsync())
+    {
+        return null;
+    }
+
+    var createdAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+    string json = reader.GetString(1);
+
+    var parsed = ParseStoredAnalysis(json);
+    return parsed == null ? null : new StoredAnalysis(createdAt, parsed);
+}
+
+Dictionary<string, object?>? ParseStoredAnalysis(string json)
+{
+    if (string.IsNullOrWhiteSpace(json))
+    {
+        return null;
+    }
+
+    try
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return (Dictionary<string, object?>)ConvertJsonElement(doc.RootElement);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+object ConvertJsonElement(JsonElement element)
+{
+    switch (element.ValueKind)
+    {
+        case JsonValueKind.Object:
+            var dict = new Dictionary<string, object?>();
+            foreach (var prop in element.EnumerateObject())
+            {
+                dict[prop.Name] = ConvertJsonElement(prop.Value);
+            }
+            return dict;
+        case JsonValueKind.Array:
+            var list = new List<object?>();
+            foreach (var item in element.EnumerateArray())
+            {
+                list.Add(ConvertJsonElement(item));
+            }
+            return list;
+        case JsonValueKind.String:
+            return element.GetString() ?? string.Empty;
+        case JsonValueKind.Number:
+            if (element.TryGetInt64(out var l))
+            {
+                return (double)l;
+            }
+            if (element.TryGetDouble(out var d))
+            {
+                return d;
+            }
+            return element.ToString();
+        case JsonValueKind.True:
+            return true;
+        case JsonValueKind.False:
+            return false;
+        case JsonValueKind.Null:
+        case JsonValueKind.Undefined:
+            return null;
+        default:
+            return element.ToString();
+    }
+}
+
 record EventRecord(
     Guid EventId,
     DateTime Ts,
@@ -751,3 +967,5 @@ record EventRecord(
 record AnalyzeRequest(string event_id);
 
 record McpCallRequest(string tool, Dictionary<string, JsonElement>? arguments);
+
+record StoredAnalysis(DateTime CreatedAt, Dictionary<string, object?> Analysis);

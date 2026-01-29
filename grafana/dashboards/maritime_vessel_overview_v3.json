@@ -18,6 +18,7 @@
   "editable": true,
   "graphTooltip": 0,
   "id": null,
+  "uid": "c571ae1c-39bf-4398-aac5-f803c7f44237",
   "links": [],
   "panels": [
     {
@@ -323,11 +324,11 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT created_at, ai_summary->>'summary' AS summary, ai_summary->'possible_causes' AS possible_causes, ai_summary->'recommended_actions' AS recommended_actions, (ai_summary->>'confidence')::int AS confidence, ai_summary->>'data_quality_notes' AS data_quality_notes FROM ai_analyses WHERE vessel_id = '$vessel_id' ORDER BY created_at DESC LIMIT 1",
+          "rawSql": "SELECT a.created_at, e.ts AS event_ts, e.event_type, a.ai_summary->>'summary' AS summary, a.ai_summary->'possible_causes' AS possible_causes, a.ai_summary->'recommended_actions' AS recommended_actions, (a.ai_summary->>'confidence')::int AS confidence, a.ai_summary->>'data_quality_notes' AS data_quality_notes FROM ai_analyses a JOIN events e ON a.event_id = e.event_id WHERE a.vessel_id = '$vessel_id' AND e.event_type IN ('overtemp','low_oil_pressure','rpm_anomaly') AND e.ts > now() - interval '24 hours' ORDER BY a.created_at DESC LIMIT 10",
           "refId": "A"
         }
       ],
-      "title": "AI Insight",
+      "title": "AI Insights (latest 10)",
       "type": "table"
     },
     {
@@ -369,7 +370,7 @@
               {
                 "id": "color",
                 "value": {
-                  "mode": "byValue"
+                  "mode": "palette-classic-by-name"
                 }
               }
             ]
@@ -377,7 +378,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "event_id"
+              "options": "analyze"
             },
             "properties": [
               {
@@ -385,7 +386,7 @@
                 "value": [
                   {
                     "title": "Analyze",
-                    "url": "http://localhost:8000/analyze?event_id=${__data.fields.event_id}",
+                    "url": "http://localhost:8000/analyze?event_id=${__data.fields.event_id}&format=html",
                     "targetBlank": true
                   }
                 ]
@@ -405,11 +406,12 @@
         "cellHeight": "sm",
         "showHeader": true
       },
+      "timeFrom": "24h",
       "targets": [
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT ts, event_id, vessel_id, severity, event_type, description FROM events WHERE vessel_id = '$vessel_id' AND ts > now() - interval '24 hours' ORDER BY ts DESC",
+          "rawSql": "SELECT ts AS \"time\", event_id, vessel_id, severity, event_type, description, 'Analyze' AS analyze FROM events WHERE vessel_id = '$vessel_id' AND event_type IN ('overtemp','low_oil_pressure','rpm_anomaly') AND $__timeFilter(ts) ORDER BY ts DESC LIMIT 200",
           "refId": "A"
         }
       ],
@@ -474,5 +476,5 @@
   },
   "timezone": "browser",
   "title": "Maritime Vessel Overview v3",
-  "version": 1
+  "version": 8
 }

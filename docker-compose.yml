@@ -54,6 +54,7 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-demo_password}
       DB_NAME: ${POSTGRES_DB:-maritime}
       SLEEP_SECONDS: 5
+      AGENT_URL: http://agent:8000
       LOG_LEVEL: INFO
     depends_on:
       - timescaledb
