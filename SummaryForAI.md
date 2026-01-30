@@ -278,6 +278,100 @@ Then:
 
 ---
 
+## Setting Up on a New PC / Fresh Clone
+
+When pulling the project to a new machine (e.g., switching from laptop to gaming PC), follow these steps:
+
+### Prerequisites
+- **Docker Desktop** installed and running
+- **Git** for cloning the repository
+- ~10GB free disk space (Ollama image ~3.2GB + llama3 model ~4.7GB + other images)
+
+### Setup Steps
+
+1. **Clone the repository**
+   ```
+   git clone <repo-url>
+   cd Mybachelorproject
+   ```
+
+2. **Create .env file**
+   ```
+   cp .env.example .env
+   ```
+   (On Windows: `copy .env.example .env`)
+
+3. **Start all services**
+   ```
+   docker compose up --build -d
+   ```
+   This will:
+   - Pull Docker images (TimescaleDB, Grafana, Ollama)
+   - Build C# services (agent, generator)
+   - Start all 5 containers
+
+4. **Pull the LLM model** (required, ~4.7GB download)
+   ```
+   docker compose exec ollama ollama pull llama3:8b
+   ```
+
+5. **Verify everything is running**
+   ```
+   docker ps
+   ```
+   Should show 5 containers: timescaledb, grafana, agent, generator, ollama
+
+6. **Open Grafana**
+   - URL: http://localhost:3000
+   - Login: admin / admin
+   - Dashboard: Maritime Vessel Overview v3
+
+### Common Issues on Fresh Setup
+
+| Issue | Solution |
+|-------|----------|
+| Docker not running | Start Docker Desktop, wait for it to fully initialize |
+| Ollama image download slow | 3.2GB download, be patient or check network |
+| Model not found error | Run `docker compose exec ollama ollama pull llama3:8b` |
+| Containers exit immediately | Check logs: `docker compose logs <service-name>` |
+| Port already in use | Stop conflicting services or change ports in docker-compose.yml |
+
+### Useful Commands
+
+```bash
+# Check container status
+docker ps
+
+# View logs for a service
+docker compose logs agent --tail 50
+docker compose logs generator --tail 50
+
+# Restart everything
+docker compose down && docker compose up --build -d
+
+# Check agent health
+curl http://localhost:8000/health
+
+# List Ollama models
+docker compose exec ollama ollama list
+
+# Stop everything
+docker compose down
+
+# Stop and remove volumes (full reset)
+docker compose down -v
+```
+
+---
+
+## Development Notes
+
+- The project was developed using multiple AI assistants (Codex, Claude) across different machines
+- Code is version-controlled in Git; Docker images/volumes are local and must be rebuilt on each machine
+- The Ollama model cache is stored in a Docker volume (`ollama_data`) and persists between restarts but not across machines
+
+---
+
 ## Summary Statement
 
 The demo is working end-to-end: synthetic telemetry generates events, Grafana shows metrics and events, the C# agent queries the DB and calls Ollama, AI analyses are stored and visualized. The system is now stable and uses only C# services for runtime logic. The main gotchas were Grafana panel config errors and time filtering, both now fixed.
