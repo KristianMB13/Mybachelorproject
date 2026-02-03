@@ -371,3 +371,25 @@ Over the past day, I made progress on the **Grafana dashboard** development. How
 
 *Log maintained by: Kristian Bergedalen*
 *Last updated: January 29, 2026*
+
+---
+
+## February 2, 2026 (Monday)
+
+### Lunsjprat med Knowit – AI, GPU/ytelse og “tags”
+
+Vi hadde lunsj med flere på kontoret og spurte om AI‑delen og praktiske valg.
+
+**1) LLM lokalt vs. sky/Colab**
+- En kollega spurte om hvor sterk GPU vi har, fordi lokale LLM‑er kan bli trege uten god maskinvare.
+- Forslag: bruke Google Colab eller annen sky‑GPU hvis PC‑ene ikke håndterer det.
+- Tolkning for oss: Lokal Ollama er helt greit for demo/pilot, men sky‑GPU er et alternativ hvis vi trenger større modeller eller raskere respons senere.
+
+**2) “Tags” i maritimt miljø**
+- En annen kollega advarte mot å sette seg for mye inn i “tags”.
+- “Tags” betyr ofte tusenvis av sensornavn/ID‑er i industrielle systemer (SCADA/PLC), og i maritimt miljø er dette ofte veldig stort, ustrukturert og vanskelig å dokumentere.
+- Råd: Ikke gjør tag‑mappning til et stort delprosjekt nå. I stedet kan vi beskrive problematikken i rapporten og bruke enkle, generiske feltnavn i prototypen.
+
+**Konklusjon fra praten**
+- Lokal AI‑kjøring er ok for nå, men vi bør nevne at sky/Colab er en mulig vei ved behov.
+- Tag‑universet er komplekst og bør beskrives, men ikke løses fullt ut i piloten.
